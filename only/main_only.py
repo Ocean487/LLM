@@ -13,15 +13,12 @@ import shutil
 from huggingface_hub import login
  
 login()
-
 # ================= 路徑與環境變數設定 =================
 BASE_DIR = "/home/s3734/heng_project"
 CACHE_DIR = os.path.join(BASE_DIR, "hf_cache")
-OFFLOAD_DIR = os.path.join(BASE_DIR, "offload_weights")
 LOG_FILE = os.path.join(BASE_DIR, "hardware_benchmark_log.csv")
 
 os.makedirs(BASE_DIR, exist_ok=True)
-os.makedirs(OFFLOAD_DIR, exist_ok=True)
 os.environ["HF_HOME"] = CACHE_DIR
 os.environ["TRANSFORMERS_CACHE"] = CACHE_DIR
 
@@ -66,6 +63,7 @@ class HardwareMonitor:
         self.keep_running = False
         self.metrics = []
         
+        # 初始化磁碟與 Swap 狀態
         self.last_disk_io = psutil.disk_io_counters()
         self.last_swap = psutil.swap_memory()
         self.last_time = time.time()
@@ -92,19 +90,22 @@ class HardwareMonitor:
             time_diff = current_time - self.last_time
             if time_diff <= 0: time_diff = 0.001
 
+            # --- 1. GPU 數據 (包含 VRAM 活躍度與 PCIe 頻寬) ---
             try:
                 gpu_temp = pynvml.nvmlDeviceGetTemperature(self.handle, pynvml.NVML_TEMPERATURE_GPU)
                 gpu_power = pynvml.nvmlDeviceGetPowerUsage(self.handle) / 1000.0 
                 gpu_mem_mb = pynvml.nvmlDeviceGetMemoryInfo(self.handle).used / (1024 ** 2)
                 util_rates = pynvml.nvmlDeviceGetUtilizationRates(self.handle)
                 gpu_util = util_rates.gpu
-                gpu_mem_util = util_rates.memory 
+                gpu_mem_util = util_rates.memory # VRAM 活躍度 (%)
                 
+                # 抓取 PCIe RX (接收) 與 TX (發送) 頻寬 (單位轉換為 MB/s)
                 pcie_rx_mb = pynvml.nvmlDeviceGetPcieThroughput(self.handle, pynvml.NVML_PCIE_UTIL_RX_BYTES) / 1024.0
                 pcie_tx_mb = pynvml.nvmlDeviceGetPcieThroughput(self.handle, pynvml.NVML_PCIE_UTIL_TX_BYTES) / 1024.0
             except:
                 gpu_temp, gpu_power, gpu_mem_mb, gpu_util, gpu_mem_util, pcie_rx_mb, pcie_tx_mb = 0, 0, 0, 0, 0, 0, 0
 
+            # --- 2. CPU RAM 數據 (包含 Swap 虛擬記憶體交換頻寬) ---
             cpu_util = psutil.cpu_percent()
             cpu_mem_mb = psutil.virtual_memory().used / (1024 ** 2)
             cpu_temp = self._safe_get_temp('coretemp')
@@ -114,6 +115,7 @@ class HardwareMonitor:
             swap_in_mb_s = ((current_swap.sin - self.last_swap.sin) / (1024**2)) / time_diff
             swap_out_mb_s = ((current_swap.sout - self.last_swap.sout) / (1024**2)) / time_diff
 
+            # --- 3. SSD 數據 ---
             current_disk_io = psutil.disk_io_counters()
             read_bytes = current_disk_io.read_bytes - self.last_disk_io.read_bytes
             read_count = current_disk_io.read_count - self.last_disk_io.read_count
@@ -128,6 +130,7 @@ class HardwareMonitor:
             ssd_temp = self._safe_get_temp('nvme')
             ssd_power = 0.5 + (read_mb_s / 7300.0) * 6.0 
 
+            # 更新狀態
             self.last_time = current_time
             self.last_disk_io = current_disk_io
             self.last_swap = current_swap
@@ -156,9 +159,6 @@ def update_plot():
         return
     
     df = pd.read_csv(LOG_FILE)
-    if len(df) == 0:
-        print("CSV 檔案中尚無數據，跳過繪圖步驟。")
-        return
     
     metrics_to_plot = [
         "Total_Duration(s)", "Load_Duration(s)",
@@ -187,11 +187,7 @@ def update_plot():
             plt.title(f'{metric} Across 5 Runs by Model')
             plt.xticks(range(1, TEST_RUNS + 1))
             plt.grid(True, linestyle='--', alpha=0.7)
-            
-            # 加入空值保護，避免再次出現 UserWarning
-            if not pivot_df.empty:
-                plt.legend(title="Model")
-                
+            plt.legend(title="Model")
             plt.tight_layout()
             
             safe_filename = metric.replace('/', '_per_').replace('(', '_').replace(')', '').replace('%', 'pct')
@@ -243,21 +239,11 @@ def main():
     try:
         load_start = time.time()
         tokenizer = AutoTokenizer.from_pretrained(repo_id)
-        
-        # 【關鍵修改點】：強制限制 GPU VRAM 使用量，預留空間給生成運算 (KV Cache)
-        # 這裡設定 GPU 最多只能放 12GB 的權重，剩下的強制放進 RAM 或 SSD
-        device_memory_limits = {
-            0: "12GiB" 
-        }
-
         model = AutoModelForCausalLM.from_pretrained(
             repo_id, 
             dtype=torch.bfloat16, 
-            device_map="auto",
-            max_memory=device_memory_limits, # 套用 VRAM 限制
-            offload_folder=OFFLOAD_DIR
+            device_map="cuda"
         )
-        
         load_duration = time.time() - load_start
         print(f"模型載入完成，Load Duration: {load_duration:.2f} 秒")
 
@@ -329,11 +315,7 @@ def main():
         
         if os.path.exists(CACHE_DIR):
             shutil.rmtree(CACHE_DIR)
-            print("   SSD 快取目錄刪除。")
-            
-        if os.path.exists(OFFLOAD_DIR):
-            shutil.rmtree(OFFLOAD_DIR)
-            print("   SSD 卸載目錄刪除。")
+            print("   SSD 快取目刪除。")
             
         update_plot()
 
