@@ -63,7 +63,7 @@ class HardwareMonitor:
         self.keep_running = False
         self.metrics = []
         
-        # 初始化磁碟與 Swap 狀態
+       
         self.last_disk_io = psutil.disk_io_counters()
         self.last_swap = psutil.swap_memory()
         self.last_time = time.time()
@@ -90,22 +90,22 @@ class HardwareMonitor:
             time_diff = current_time - self.last_time
             if time_diff <= 0: time_diff = 0.001
 
-            # --- 1. GPU 數據 (包含 VRAM 活躍度與 PCIe 頻寬) ---
+           
             try:
                 gpu_temp = pynvml.nvmlDeviceGetTemperature(self.handle, pynvml.NVML_TEMPERATURE_GPU)
                 gpu_power = pynvml.nvmlDeviceGetPowerUsage(self.handle) / 1000.0 
                 gpu_mem_mb = pynvml.nvmlDeviceGetMemoryInfo(self.handle).used / (1024 ** 2)
                 util_rates = pynvml.nvmlDeviceGetUtilizationRates(self.handle)
                 gpu_util = util_rates.gpu
-                gpu_mem_util = util_rates.memory # VRAM 活躍度 (%)
+                gpu_mem_util = util_rates.memory 
                 
-                # 抓取 PCIe RX (接收) 與 TX (發送) 頻寬 (單位轉換為 MB/s)
+                
                 pcie_rx_mb = pynvml.nvmlDeviceGetPcieThroughput(self.handle, pynvml.NVML_PCIE_UTIL_RX_BYTES) / 1024.0
                 pcie_tx_mb = pynvml.nvmlDeviceGetPcieThroughput(self.handle, pynvml.NVML_PCIE_UTIL_TX_BYTES) / 1024.0
             except:
                 gpu_temp, gpu_power, gpu_mem_mb, gpu_util, gpu_mem_util, pcie_rx_mb, pcie_tx_mb = 0, 0, 0, 0, 0, 0, 0
 
-            # --- 2. CPU RAM 數據 (包含 Swap 虛擬記憶體交換頻寬) ---
+           
             cpu_util = psutil.cpu_percent()
             cpu_mem_mb = psutil.virtual_memory().used / (1024 ** 2)
             cpu_temp = self._safe_get_temp('coretemp')
@@ -115,7 +115,7 @@ class HardwareMonitor:
             swap_in_mb_s = ((current_swap.sin - self.last_swap.sin) / (1024**2)) / time_diff
             swap_out_mb_s = ((current_swap.sout - self.last_swap.sout) / (1024**2)) / time_diff
 
-            # --- 3. SSD 數據 ---
+                      
             current_disk_io = psutil.disk_io_counters()
             read_bytes = current_disk_io.read_bytes - self.last_disk_io.read_bytes
             read_count = current_disk_io.read_count - self.last_disk_io.read_count
@@ -153,7 +153,7 @@ class HardwareMonitor:
         if not self.metrics: return {}
         return {k: sum(d[k] for d in self.metrics)/len(self.metrics) for k in self.metrics[0]}
 
-# ================= 繪圖與更新分析 =================
+# ================= 繪圖=================
 def update_plot():
     if not os.path.exists(LOG_FILE):
         return

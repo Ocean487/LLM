@@ -1,5 +1,5 @@
 import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
+from transformers import AutoModelForCausalLM, AutoTokenizer, Mxfp4Config
 from transformers.generation.streamers import BaseStreamer
 import pynvml
 import psutil
@@ -12,23 +12,18 @@ import os
 import shutil
 from huggingface_hub import login
 
+login()
+
 # ================= 路徑與環境變數設定 =================
 BASE_DIR = "/home/s3734/heng_project"
 CACHE_DIR = os.path.join(BASE_DIR, "hf_cache")
+OFFLOAD_DIR = os.path.join(BASE_DIR, "offload_weights")
 LOG_FILE = os.path.join(BASE_DIR, "hardware_benchmark_log.csv")
 
 os.makedirs(BASE_DIR, exist_ok=True)
+os.makedirs(OFFLOAD_DIR, exist_ok=True)
 os.environ["HF_HOME"] = CACHE_DIR
 os.environ["TRANSFORMERS_CACHE"] = CACHE_DIR
-
-# ================= 量化配置 (核心修改) =================
-# 使用 4-bit 量化 (NF4)，這能將模型體積縮小約 4 倍
-quantization_config = BitsAndBytesConfig(
-    load_in_4bit=True,
-    bnb_4bit_compute_dtype=torch.bfloat16, # 計算時使用 bfloat16 提升速度
-    bnb_4bit_quant_type="nf4",             # 使用 Normal Float 4，精準度較佳
-    bnb_4bit_use_double_quant=True,       # 第二次量化量化常數，進一步省空間
-)
 
 # ================= 參數與模型清單 =================
 MODELS_TO_TEST = {
@@ -45,72 +40,134 @@ MODELS_TO_TEST = {
 
 TEST_RUNS = 5
 MAX_NEW_TOKENS = 1024 
-USE_PROMPT = "請撰寫一篇約 2000 字的深度分析文章，探討量子計算在未來十年內的應用。"
+PROMPT_ZH = "請撰寫一篇約 2000 字的深度分析文章，探討量子計算在未來十年內，將如何顛覆製藥和材料科學這兩個領域。"
 
-# (其餘 HardwareMonitor 與 OllamaTimingStreamer 類別保持不變，此處略過以節省空間)
+# ================= 效能計算攔截器 =================
+class OllamaTimingStreamer(BaseStreamer):
+    def __init__(self):
+        self.put_count = 0
+        self.first_token_time = None
+    def put(self, value):
+        if self.put_count == 1: self.first_token_time = time.time()
+        self.put_count += 1
+    def end(self): pass
 
-# ================= 主程式修改 =================
+# ================= 硬體監控類別 =================
+class HardwareMonitor:
+    def __init__(self):
+        try:
+            pynvml.nvmlInit()
+            self.handle = pynvml.nvmlDeviceGetHandleByIndex(0)
+        except: self.handle = None
+        self.keep_running = False
+        self.metrics = []
+        self.thread = None
+        self.last_disk_io = psutil.disk_io_counters()
+        self.last_time = time.time()
+
+    def start(self):
+        self.keep_running = True
+        self.metrics = []
+        self.thread = threading.Thread(target=self._monitor_loop)
+        self.thread.start()
+
+    def _monitor_loop(self):
+        while self.keep_running:
+            current_time = time.time()
+            time_diff = max(current_time - self.last_time, 0.001)
+            try:
+                gpu_mem, gpu_util = 0, 0
+                if self.handle:
+                    gpu_mem = pynvml.nvmlDeviceGetMemoryInfo(self.handle).used / (1024**2)
+                    gpu_util = pynvml.nvmlDeviceGetUtilizationRates(self.handle).gpu
+                curr_io = psutil.disk_io_counters()
+                read_mb_s = ((curr_io.read_bytes - self.last_disk_io.read_bytes) / (1024**2)) / time_diff
+                self.metrics.append({
+                    "GPU_Mem_MB": gpu_mem, "GPU_Util": gpu_util,
+                    "CPU_Mem_MB": psutil.virtual_memory().used/(1024**2),
+                    "CPU_Util": psutil.cpu_percent(),
+                    "SSD_Read_MB_s": read_mb_s
+                })
+                self.last_time, self.last_disk_io = current_time, curr_io
+            except: pass
+            time.sleep(0.5)
+
+    def stop(self):
+        self.keep_running = False
+        if self.thread and self.thread.is_alive(): self.thread.join()
+        if not self.metrics: return {}
+        return {k: sum(d[k] for d in self.metrics)/len(self.metrics) for k in self.metrics[0]}
+
+def update_plot():
+    if not os.path.exists(LOG_FILE): return
+    df = pd.read_csv(LOG_FILE)
+    if df.empty: return
+    metrics = ["Duration(s)", "Eval_Rate(t/s)", "GPU_Mem_MB", "SSD_Read_MB_s"]
+    for m in metrics:
+        if m in df.columns:
+            plt.figure(figsize=(10, 6))
+            pivot = df.pivot(index='Run', columns='Model', values=m)
+            pivot.plot(marker='o')
+            plt.title(f"{m} Benchmark")
+            plt.savefig(os.path.join(BASE_DIR, f"chart_{m.replace('/', '_')}.png"))
+            plt.close()
+
+# ================= 主程式 =================
 def main():
-    # ... (前面的 LOG 檔案初始化邏輯保持不變) ...
+    if not os.path.exists(LOG_FILE):
+        with open(LOG_FILE, 'w', newline='') as f:
+            csv.writer(f).writerow(["Model", "Run", "Duration(s)", "Eval_Rate(t/s)", "GPU_Mem_MB", "SSD_Read_MB_s"])
 
-    choice = input("請輸入要測試的模型編號 (輸入 q 離開): ")
-    if choice.lower() == 'q' or choice not in MODELS_TO_TEST:
-        return
-
+    print("\n可用模型清單:")
+    for k, v in MODELS_TO_TEST.items(): print(f"[{k}] {v[0]}")
+    choice = input("請輸入編號: ")
+    if choice not in MODELS_TO_TEST: return
     model_name, repo_id = MODELS_TO_TEST[choice]
-    print(f"\n準備以 4-bit 量化模式載入模型: {model_name}")
-    
-    monitor = HardwareMonitor()
+    quant_config = Mxfp4Config() 
 
+    monitor = HardwareMonitor()
     try:
+        print(f"載入模型 {model_name}...")
         load_start = time.time()
         tokenizer = AutoTokenizer.from_pretrained(repo_id)
         
-        # 核心載入邏輯變更
+        # 傳入正確的 quantization_config
         model = AutoModelForCausalLM.from_pretrained(
-            repo_id,
-            quantization_config=quantization_config, # 注入量化配置
-            device_map="auto",                       # 自動分配 GPU 資源
-            trust_remote_code=True
+            repo_id, 
+            quantization_config=quant_config,
+            device_map="auto",
+            max_memory={0: "12GiB"}, 
+            offload_folder=OFFLOAD_DIR,
+            low_cpu_mem_usage=True
         )
-        
-        load_duration = time.time() - load_start
-        print(f"量化模型載入完成，耗時: {load_duration:.2f} 秒")
+        print(f"載入完成，耗時: {time.time() - load_start:.2f}s")
 
-        # 確保輸入數據在正確的設備上
-        inputs = tokenizer(USE_PROMPT, return_tensors="pt").to(model.device)
-        prompt_eval_count = inputs.input_ids.shape[1]
+        inputs = tokenizer(PROMPT_ZH, return_tensors="pt").to("cuda")
 
         for run in range(1, TEST_RUNS + 1):
-            print(f"  執行第 {run}/{TEST_RUNS} 次測試...")
+            print(f"執行第 {run} 次測試...")
             streamer = OllamaTimingStreamer()
             monitor.start()
-            
-            gen_start_time = time.time()
+            start_t = time.time()
             with torch.no_grad():
-                outputs = model.generate(
-                    **inputs, 
-                    max_new_tokens=MAX_NEW_TOKENS,
-                    streamer=streamer,
-                    pad_token_id=tokenizer.eos_token_id
-                )
-            
-            gen_end_time = time.time()
+                outputs = model.generate(**inputs, max_new_tokens=MAX_NEW_TOKENS, streamer=streamer)
             avg_hw = monitor.stop()
+            total_dur = time.time() - start_t
+            eval_count = outputs.shape[1] - inputs.input_ids.shape[1]
+            eval_rate = eval_count / total_dur
 
-            # ... (後續計算 Duration 與寫入 CSV 的邏輯保持不變) ...
-            # 建議在 CSV 記錄中標註此為量化版本
+            with open(LOG_FILE, 'a', newline='') as f:
+                csv.writer(f).writerow([model_name, run, round(total_dur, 2), round(eval_rate, 2), 
+                                       round(avg_hw.get("GPU_Mem_MB", 0), 1), round(avg_hw.get("SSD_Read_MB_s", 0), 2)])
+            print(f"  完成! 速度: {eval_rate:.2f} t/s")
 
     except Exception as e:
-        print(f"執行失敗: {e}")
-        if 'monitor' in locals(): monitor.stop()
-
+        print(f"錯誤: {e}")
+        if monitor.thread: monitor.stop()
     finally:
-        # 清理資源
         if 'model' in locals(): del model
-        if 'tokenizer' in locals(): del tokenizer
         torch.cuda.empty_cache()
-        # ... (其餘清理邏輯) ...
+        update_plot()
 
 if __name__ == "__main__":
     main()

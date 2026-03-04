@@ -187,8 +187,7 @@ def update_plot():
             plt.title(f'{metric} Across 5 Runs by Model')
             plt.xticks(range(1, TEST_RUNS + 1))
             plt.grid(True, linestyle='--', alpha=0.7)
-            
-            # 加入空值保護，避免再次出現 UserWarning
+        
             if not pivot_df.empty:
                 plt.legend(title="Model")
                 
@@ -244,8 +243,7 @@ def main():
         load_start = time.time()
         tokenizer = AutoTokenizer.from_pretrained(repo_id)
         
-        # 【關鍵修改點】：強制限制 GPU VRAM 使用量，預留空間給生成運算 (KV Cache)
-        # 這裡設定 GPU 最多只能放 12GB 的權重，剩下的強制放進 RAM 或 SSD
+      
         device_memory_limits = {
             0: "12GiB" 
         }
@@ -254,7 +252,7 @@ def main():
             repo_id, 
             dtype=torch.bfloat16, 
             device_map="auto",
-            max_memory=device_memory_limits, # 套用 VRAM 限制
+            max_memory=device_memory_limits,
             offload_folder=OFFLOAD_DIR
         )
         
