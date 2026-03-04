@@ -44,7 +44,7 @@ MAX_NEW_TOKENS = 1024
 PROMPT_ZH = "請撰寫一篇約 2000 字的深度分析文章，探討量子計算在未來十年內，將如何顛覆製藥和材料科學這兩個領域。文章需包含基本原理介紹、潛在應用案例，以及目前面臨的主要技術挑戰。"
 USE_PROMPT = PROMPT_ZH 
 
-# ================= 效能計算攔截器 =================
+# ================= 效能計算 =================
 class OllamaTimingStreamer(BaseStreamer):
     def __init__(self):
         self.put_count = 0
