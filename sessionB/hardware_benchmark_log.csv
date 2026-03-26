@@ -1,2 +1,0 @@
-Model,Run,Total_Duration(s),Load_Duration(s),Eval_Rate(t/s),GPU_Mem_MB
-gpt-oss-20b,1,3197.41,0.32,15615.4,0.02
