@@ -45,7 +45,7 @@ MODELS_TO_TEST = {
 
 TEST_RUNS = 5
 MAX_NEW_TOKENS = 1024 
-USE_PROMPT = "請撰寫一篇約 2000 字的深度分析文章，探討量子計算在未來十年內，將如何顛覆製藥和材料科學這兩個領域。"
+USE_PROMPT = "請撰寫一篇約 2000 字的深度分析文章，探討量子計算在未來十年內，將如何顛覆製藥和材料科學這兩個領域。文章需包含基本原理介紹、潛在應用案例，以及目前面臨的主要技術挑戰。"
 
 # ================= 工具函式 =================
 def get_decoder_layer_class(model):
@@ -60,7 +60,7 @@ def get_decoder_layer_class(model):
         return ["GPTJBlock", "GPT2Block", "ParallelBlock"]
     return None
 
-# ================= 自定義 8-bit 量化神經網路層 =================
+# ================= 量化 =================
 class CustomCenterQuantizerLinear(nn.Module):
     def __init__(self, in_features, out_features, bias=True, compute_dtype=torch.bfloat16, bit_width=8):
         super().__init__()
@@ -135,8 +135,8 @@ def replace_and_quantize_model(model, current_path=""):
         else:
             replace_and_quantize_model(module, full_name)
 
-# ================= 硬體監控與 Streamer =================
-class OllamaTimingStreamer(BaseStreamer):
+# ================= 硬體監控 =================
+class TimingStreamer(BaseStreamer):
     def __init__(self):
         self.put_count = 0
         self.first_token_time = None
@@ -202,7 +202,6 @@ def main():
     if choice not in MODELS_TO_TEST: return
     model_name, repo_id = MODELS_TO_TEST[choice]
 
-    # 提前初始化 monitor 避免 NameError
     monitor = HardwareMonitor()
 
     try:
@@ -211,14 +210,14 @@ def main():
         input_tokens = tokenizer(USE_PROMPT, return_tensors="pt")
         prompt_eval_count = input_tokens.input_ids.shape[1]
 
-        print("階段 1: 載入模型至 CPU RAM...")
+        print("載入模型至 CPU RAM")
         model = AutoModelForCausalLM.from_pretrained(repo_id, device_map="cpu", torch_dtype=torch.bfloat16, low_cpu_mem_usage=True)
         
-        print("階段 2: 執行自定義量化...")
+        print("執行量化")
         replace_and_quantize_model(model)
         gc.collect()
 
-        print("階段 3: 自動分流 (GPU/RAM/SSD)...")
+        print("自動分配權重")
         sys_max_mem = get_max_memory()
         max_memory = {k: (int(v * 0.80) if isinstance(k, int) else v) 
             for k, v in sys_max_mem.items()}
@@ -226,7 +225,6 @@ def main():
         layer_class = get_decoder_layer_class(model)
         device_map = infer_auto_device_map(model, max_memory=max_memory, no_split_module_classes=layer_class)
         
-        # 修正: 移除 offload_index=True, 加入 offload_buffers=True
         model = dispatch_model(
             model, 
             device_map=device_map, 
@@ -244,7 +242,7 @@ def main():
 
         for run in range(1, TEST_RUNS + 1):
             print(f"測試次數 {run}/{TEST_RUNS}...")
-            streamer = OllamaTimingStreamer()
+            streamer = TimingStreamer()
             monitor.start()
             start_t = time.time()
             
@@ -255,7 +253,6 @@ def main():
             avg_hw = monitor.stop()
             eval_count = outputs.shape[1] - prompt_eval_count
             
-            # 計算 Token/s
             eval_time = duration - (streamer.first_token_time - start_t if streamer.first_token_time else 0)
             eval_rate = eval_count / eval_time if eval_time > 0 else 0
 
