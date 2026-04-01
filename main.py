@@ -164,7 +164,7 @@ def main():
         model = dispatch_model(model, device_map=device_map, offload_dir=OFFLOAD_DIR)
 
         load_duration = time.time() - load_start
-        print(f"[成功] {current_model_tag} 載入完成，耗時: {load_duration:.2f}s")
+        print(f"{current_model_tag} 載入完成，耗時: {load_duration:.2f}s")
 
         inputs = tokenizer(prompt, return_tensors="pt").to("cuda")
         
@@ -193,7 +193,7 @@ def main():
             print(f"Run {run}: 耗時 {gen_duration:.2f} 秒 | 模式:  NF4 | 顯存: {avg_hw['GPU_Mem_MB']:.0f} MB")
 
     except Exception as e:
-        print(f"\n[錯誤] 執行失敗: {e}")
+        print(f"\n執行失敗: {e}")
         traceback.print_exc()
     finally:
         if 'model' in locals(): del model
@@ -201,7 +201,7 @@ def main():
         if os.path.exists(OFFLOAD_DIR):
             shutil.rmtree(OFFLOAD_DIR)
             os.makedirs(OFFLOAD_DIR, exist_ok=True)
-        print("[系統] 資源已釋放。")
+        print("資源已釋放。")
 
 if __name__ == "__main__":
     main()
