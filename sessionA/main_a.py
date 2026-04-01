@@ -25,7 +25,7 @@ os.makedirs(OFFLOAD_DIR, exist_ok=True)
 os.environ["HF_HOME"] = CACHE_DIR
 os.environ["TRANSFORMERS_CACHE"] = CACHE_DIR
 
-# ================= 參數與模型清單 =================
+# ================= 模型清單 =================
 MODELS_TO_TEST = {
     "1": ("gpt-oss-20b", "openai/gpt-oss-20b"),
     "2": ("gpt-oss-120b", "openai/gpt-oss-120b"),
@@ -58,7 +58,7 @@ class OllamaTimingStreamer(BaseStreamer):
     def end(self):
         pass
 
-# ================= 硬體監控類別 =================
+# ================= 硬體監控 =================
 class HardwareMonitor:
     def __init__(self):
         pynvml.nvmlInit()
@@ -150,7 +150,7 @@ class HardwareMonitor:
         if not self.metrics: return {}
         return {k: sum(d[k] for d in self.metrics)/len(self.metrics) for k in self.metrics[0]}
 
-# ================= 繪圖與更新分析 =================
+# ================= 繪圖=================
 def update_plot():
     if not os.path.exists(LOG_FILE):
         return
@@ -337,3 +337,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

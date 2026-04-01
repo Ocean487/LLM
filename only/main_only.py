@@ -22,7 +22,7 @@ os.makedirs(BASE_DIR, exist_ok=True)
 os.environ["HF_HOME"] = CACHE_DIR
 os.environ["TRANSFORMERS_CACHE"] = CACHE_DIR
 
-# ================= 參數與模型清單 =================
+# ================= 模型清單 =================
 MODELS_TO_TEST = {
     "1": ("gpt-oss-20b", "openai/gpt-oss-20b"),
     "2": ("gpt-oss-120b", "openai/gpt-oss-120b"),
@@ -41,7 +41,7 @@ MAX_NEW_TOKENS = 1024
 PROMPT_ZH = "請撰寫一篇約 2000 字的深度分析文章，探討量子計算在未來十年內，將如何顛覆製藥和材料科學這兩個領域。文章需包含基本原理介紹、潛在應用案例，以及目前面臨的主要技術挑戰。"
 USE_PROMPT = PROMPT_ZH 
 
-# ================= 效能計算攔截器 =================
+# ================= 效能計算 =================
 class OllamaTimingStreamer(BaseStreamer):
     def __init__(self):
         self.put_count = 0
@@ -55,7 +55,7 @@ class OllamaTimingStreamer(BaseStreamer):
     def end(self):
         pass
 
-# ================= 硬體監控類別 =================
+# ================= 硬體監控 =================
 class HardwareMonitor:
     def __init__(self):
         pynvml.nvmlInit()
@@ -63,7 +63,6 @@ class HardwareMonitor:
         self.keep_running = False
         self.metrics = []
         
-       
         self.last_disk_io = psutil.disk_io_counters()
         self.last_swap = psutil.swap_memory()
         self.last_time = time.time()
@@ -90,22 +89,19 @@ class HardwareMonitor:
             time_diff = current_time - self.last_time
             if time_diff <= 0: time_diff = 0.001
 
-           
             try:
                 gpu_temp = pynvml.nvmlDeviceGetTemperature(self.handle, pynvml.NVML_TEMPERATURE_GPU)
                 gpu_power = pynvml.nvmlDeviceGetPowerUsage(self.handle) / 1000.0 
                 gpu_mem_mb = pynvml.nvmlDeviceGetMemoryInfo(self.handle).used / (1024 ** 2)
                 util_rates = pynvml.nvmlDeviceGetUtilizationRates(self.handle)
                 gpu_util = util_rates.gpu
-                gpu_mem_util = util_rates.memory 
-                
+                gpu_mem_util = util_rates.memory # VRAM 活躍度 (%)
                 
                 pcie_rx_mb = pynvml.nvmlDeviceGetPcieThroughput(self.handle, pynvml.NVML_PCIE_UTIL_RX_BYTES) / 1024.0
                 pcie_tx_mb = pynvml.nvmlDeviceGetPcieThroughput(self.handle, pynvml.NVML_PCIE_UTIL_TX_BYTES) / 1024.0
             except:
                 gpu_temp, gpu_power, gpu_mem_mb, gpu_util, gpu_mem_util, pcie_rx_mb, pcie_tx_mb = 0, 0, 0, 0, 0, 0, 0
 
-           
             cpu_util = psutil.cpu_percent()
             cpu_mem_mb = psutil.virtual_memory().used / (1024 ** 2)
             cpu_temp = self._safe_get_temp('coretemp')
@@ -115,7 +111,6 @@ class HardwareMonitor:
             swap_in_mb_s = ((current_swap.sin - self.last_swap.sin) / (1024**2)) / time_diff
             swap_out_mb_s = ((current_swap.sout - self.last_swap.sout) / (1024**2)) / time_diff
 
-                      
             current_disk_io = psutil.disk_io_counters()
             read_bytes = current_disk_io.read_bytes - self.last_disk_io.read_bytes
             read_count = current_disk_io.read_count - self.last_disk_io.read_count
@@ -130,7 +125,6 @@ class HardwareMonitor:
             ssd_temp = self._safe_get_temp('nvme')
             ssd_power = 0.5 + (read_mb_s / 7300.0) * 6.0 
 
-            # 更新狀態
             self.last_time = current_time
             self.last_disk_io = current_disk_io
             self.last_swap = current_swap
@@ -153,7 +147,7 @@ class HardwareMonitor:
         if not self.metrics: return {}
         return {k: sum(d[k] for d in self.metrics)/len(self.metrics) for k in self.metrics[0]}
 
-# ================= 繪圖=================
+# ================= 繪圖 =================
 def update_plot():
     if not os.path.exists(LOG_FILE):
         return
@@ -321,3 +315,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

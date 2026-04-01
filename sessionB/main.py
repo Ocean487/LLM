@@ -12,7 +12,6 @@ import os
 import shutil
 import traceback
 
-# 環境變數：優化顯存
 os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
 
 # ================= 配置設定 =================
@@ -36,8 +35,8 @@ MODELS_TO_TEST = {
     "8": ("Qwen1.5-72B", "Qwen/Qwen1.5-72B"),
     "9": ("Qwen1.5-110B", "Qwen/Qwen1.5-110B")
 }
+
 def get_no_split_modules(model):
-    # 針對不同架構定義不分割層（防止一個 Layer 被拆在 CPU 和 GPU 導致報錯）
     if "Gemma2" in model.__class__.__name__:
         return ["Gemma2DecoderLayer"]
     elif "Llama" in model.__class__.__name__:
@@ -45,9 +44,10 @@ def get_no_split_modules(model):
     elif "Qwen2" in model.__class__.__name__:
         return ["Qwen2DecoderLayer"]
     return getattr(model, "_no_split_modules", None)
+
 # ================= 工具類別 =================
 def save_to_csv(data):
-    fieldnames = ["Timestamp", "Model", "Run", "TPS", "GPU_MB", "CPU_Util", "LoadTime_Sec"]
+    fieldnames = ["Timestamp", "Model", "Run", "Total_Duration(s)", "GPU_MB", "CPU_Util", "LoadTime_Sec"]
     file_exists = os.path.isfile(LOG_FILE)
     with open(LOG_FILE, mode='a', newline='', encoding='utf-8') as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
@@ -61,11 +61,13 @@ class HardwareMonitor:
         self.handle = pynvml.nvmlDeviceGetHandleByIndex(0)
         self.keep_running = False
         self.metrics = []
+
     def start(self):
         self.keep_running = True
         self.metrics = []
         self.thread = threading.Thread(target=self._monitor_loop)
         self.thread.start()
+
     def _monitor_loop(self):
         while self.keep_running:
             try:
@@ -78,20 +80,19 @@ class HardwareMonitor:
                 })
             except: pass
             time.sleep(0.5)
+
     def stop(self):
         self.keep_running = False
         if hasattr(self, 'thread'): self.thread.join()
         if not self.metrics: return {"GPU_Util":0, "GPU_Mem_MB":0, "CPU_Util":0}
         return {k: sum(d[k] for d in self.metrics)/len(self.metrics) for k in self.metrics[0]}
 
-# ================= 手動 NF4 核心邏輯 =================
+# =================  NF4 =================
 def convert_to_nf4_manual(model):
     for name, module in model.named_children():
         if isinstance(module, nn.Linear):
-            # 排除掉某些不應量化的層 (如 lm_head)
             if "lm_head" in name or "embed_tokens" in name:
                 continue
-                
             new_layer = bnb.nn.Linear4bit(
                 module.in_features,
                 module.out_features,
@@ -101,10 +102,7 @@ def convert_to_nf4_manual(model):
                 compress_statistics=True,
                 device=torch.device("cpu")
             )
-            
-            # 確保權重是實體張量後才封裝
             if module.weight.device.type == 'meta':
-                raise RuntimeError(f"層 {name} 仍為 Meta Tensor，請確認 low_cpu_mem_usage 設定。")
                 
             new_layer.weight = bnb.nn.Params4bit(
                 module.weight.data,
@@ -112,16 +110,15 @@ def convert_to_nf4_manual(model):
                 quant_type="nf4",
                 compress_statistics=True
             ).to("cpu")
-            
             if module.bias is not None:
                 new_layer.bias = nn.Parameter(module.bias.data).to("cpu")
-            
             setattr(model, name, new_layer)
         else:
             convert_to_nf4_manual(module)
+
 def main():
     print("\n" + "="*50)
-    print("手動 NF4 測試工具 - RTX 5070 Ti 16GB")
+    print(" NF4 量化")
     print("="*50)
     for key, (name, _) in MODELS_TO_TEST.items():
         print(f"[{key}] {name}")
@@ -133,44 +130,44 @@ def main():
     torch.cuda.empty_cache()
     monitor = HardwareMonitor()
 
+    
+    current_model_tag = f"{model_name}-Manual-NF4"
+
     try:
         load_start = time.time()
         tokenizer = AutoTokenizer.from_pretrained(repo_id, trust_remote_code=True)
         
-        # 修正：12B 以上模型建議開啟 low_cpu_mem_usage=True 但需配合緩慢加載
-        # 如果 device_map=None 還是報 Meta Tensor 錯誤，請將其設為 "cpu"
-        print(f"[系統] 正在將模型載入至 RAM...")
+        print(f"正在模型載入")
+        
         model = AutoModelForCausalLM.from_pretrained(
             repo_id,
-            device_map="cpu",  # 明確指定載入到 CPU，避免 Meta Tensor
+            device_map="cpu", 
             torch_dtype=torch.bfloat16,
-            low_cpu_mem_usage=True, # Gemma 2 必須開啟此項以節省 RAM
+            low_cpu_mem_usage=True,
             trust_remote_code=True
         )
 
-        print("[系統] 正在進行 NF4 權重封裝...")
+        print(f"正在執行NF4")
         convert_to_nf4_manual(model)
 
-        # 針對 Gemma 2 優化 Device Map
+        
         no_split = get_no_split_modules(model)
         
-        # 顯存保留：gemma-12b 建議保留更多顯存給運算
-        max_mem = {0: "11GiB", "cpu": "128GiB"} 
-        
+        max_mem = {0: "12GiB", "cpu": "128GiB"} 
         device_map = infer_auto_device_map(
             model,
             max_memory=max_mem,
             no_split_module_classes=no_split
         )
         
-        print("[系統] 正在派發模型至 GPU...")
+        print("正在將模型轉至 GPU")
         model = dispatch_model(model, device_map=device_map, offload_dir=OFFLOAD_DIR)
 
         load_duration = time.time() - load_start
-        print(f"[成功] 模型載入並量化完成，耗時: {load_duration:.2f}s")
+        print(f"[成功] {current_model_tag} 載入完成，耗時: {load_duration:.2f}s")
 
-        # 測試推論
-        inputs = tokenizer("請用繁體中文介紹什麼是人工智慧。", return_tensors="pt").to("cuda")
+        prompt = "請撰寫一篇約 2000 字的深度分析文章，探討量子計算在未來十年內，將如何顛覆製藥和材料科學這兩個領域。文章需包含基本原理介紹、潛在應用案例，以及目前面臨的主要技術挑戰。"
+        inputs = tokenizer(prompt, return_tensors="pt").to("cuda")
         
         for run in range(1, 6):
             monitor.start()
@@ -184,17 +181,17 @@ def main():
             gen_end = time.time()
             avg_hw = monitor.stop()
 
-            tps = (output.shape[1] - inputs.input_ids.shape[1]) / (gen_end - gen_start)
+            gen_duration = gen_end - gen_start
+            
             save_to_csv({
-                "Timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
-                "Model": model_name,
+                "Model": current_model_tag,
                 "Run": run,
-                "TPS": round(tps, 2),
+                "Total_Duration(s)": round(gen_duration, 4),
                 "GPU_MB": round(avg_hw['GPU_Mem_MB'], 0),
                 "CPU_Util": round(avg_hw['CPU_Util'], 1),
                 "LoadTime_Sec": round(load_duration, 2)
             })
-            print(f"Run {run}: {tps:.2f} t/s | 顯存: {avg_hw['GPU_Mem_MB']:.0f} MB")
+            print(f"Run {run}: 耗時 {gen_duration:.2f} 秒 | 模式:  NF4 | 顯存: {avg_hw['GPU_Mem_MB']:.0f} MB")
 
     except Exception as e:
         print(f"\n[錯誤] 執行失敗: {e}")
@@ -209,3 +206,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
