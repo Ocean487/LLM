@@ -13,7 +13,7 @@ import shutil
 import traceback
 
 os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
-
+prompt = "請撰寫一篇約 2000 字的深度分析文章，探討量子計算在未來十年內，將如何顛覆製藥和材料科學這兩個領域。文章需包含基本原理介紹、潛在應用案例，以及目前面臨的主要技術挑戰。"
 # ================= 配置設定 =================
 BASE_DIR = "/home/s3734/heng_project"
 CACHE_DIR = os.path.join(BASE_DIR, "hf_cache")
@@ -166,7 +166,7 @@ def main():
         load_duration = time.time() - load_start
         print(f"[成功] {current_model_tag} 載入完成，耗時: {load_duration:.2f}s")
 
-        prompt = "請撰寫一篇約 2000 字的深度分析文章，探討量子計算在未來十年內，將如何顛覆製藥和材料科學這兩個領域。文章需包含基本原理介紹、潛在應用案例，以及目前面臨的主要技術挑戰。"
+      
         inputs = tokenizer(prompt, return_tensors="pt").to("cuda")
         
         for run in range(1, 6):
@@ -194,7 +194,7 @@ def main():
             print(f"Run {run}: 耗時 {gen_duration:.2f} 秒 | 模式:  NF4 | 顯存: {avg_hw['GPU_Mem_MB']:.0f} MB")
 
     except Exception as e:
-        print(f"\n[錯誤] 執行失敗: {e}")
+        print(f"\n執行失敗: {e}")
         traceback.print_exc()
     finally:
         if 'model' in locals(): del model
@@ -202,7 +202,7 @@ def main():
         if os.path.exists(OFFLOAD_DIR):
             shutil.rmtree(OFFLOAD_DIR)
             os.makedirs(OFFLOAD_DIR, exist_ok=True)
-        print("[系統] 資源已釋放。")
+        print("資源已釋放。")
 
 if __name__ == "__main__":
     main()

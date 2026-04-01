@@ -329,7 +329,7 @@ def main():
         model = torch.compile(model)
         
         load_duration = time.time() - load_start
-        print(f"載入與自定義量化總耗時: {load_duration:.2f} 秒")
+        print(f"載入與量化總耗時: {load_duration:.2f} 秒")
 
         inputs = tokenizer(USE_PROMPT, return_tensors="pt").to("cuda")
         prompt_eval_count = inputs.input_ids.shape[1]

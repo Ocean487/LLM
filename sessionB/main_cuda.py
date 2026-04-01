@@ -45,11 +45,9 @@ MAX_NEW_TOKENS = 1024
 PROMPT_ZH = "請撰寫一篇約 2000 字的深度分析文章，探討量子計算在未來十年內，將如何顛覆製藥和材料科學這兩個領域。文章需包含基本原理介紹、潛在應用案例，以及目前面臨的主要技術挑戰。"
 USE_PROMPT = PROMPT_ZH 
 
-# ================= 自定義 8-bit 量化神經網路層 =================
+# ================= 量化 =================
 class CustomCenterQuantizerLinear(nn.Module):
-    """
-    自定義非均勻量化層 (中心細、中心粗、長尾對數)
-    """
+   
     def __init__(self, in_features, out_features, bias=True, compute_dtype=torch.bfloat16, bit_width=8):
         super().__init__()
         self.in_features = in_features
@@ -57,10 +55,8 @@ class CustomCenterQuantizerLinear(nn.Module):
         self.compute_dtype = compute_dtype
         self.bit_width = bit_width
         
-        # 計算量化位元的最大整數值 (8-bit 為 127)
         self.q_max = (1 << (bit_width - 1)) - 1 
 
-        # 註冊必要的 Buffer，確保能隨模型轉移至 GPU
         self.register_buffer("weight_q", torch.zeros((out_features, in_features), dtype=torch.int8))
         self.register_buffer("epsilon", torch.zeros(1, dtype=torch.float32))
         self.register_buffer("gamma", torch.zeros(1, dtype=torch.float32))
@@ -76,33 +72,25 @@ class CustomCenterQuantizerLinear(nn.Module):
         abs_w = torch.abs(weight_float)
         sign_w = torch.sign(weight_float)
         
-        # 1. 動態校準 (Calibration)：利用標準差決定邊界
         std_w = torch.std(weight_float).clamp(min=1e-7)
-        eps = 0.1 * std_w  # 死區範圍
-        gam = 1.5 * std_w  # 核心高密度區範圍
+        eps = 0.1 * std_w  
+        gam = 1.5 * std_w  
         
         self.epsilon.copy_(eps)
         self.gamma.copy_(gam)
         
-        # 2. 正向映射 T(x)
+        
         y = torch.zeros_like(weight_float)
         
-        # 建立區間遮罩
         mask_core = (abs_w >= eps) & (abs_w < gam)
         mask_tail = (abs_w >= gam)
         
-        # 套用公式
         y[mask_core] = sign_w[mask_core] * ((abs_w[mask_core] - eps) / (gam - eps))
         y[mask_tail] = sign_w[mask_tail] * (1.0 + torch.log(abs_w[mask_tail] / gam))
-        # abs_w < eps 的部分預設為 0，形成死區
-        
-        # 3. 計算縮放因子並量化至整數
-        # 找出 T(x) 映射後的最大絕對值，將其對齊到整數邊界 q_max
         max_y = torch.max(torch.abs(y)).clamp(min=1e-7)
         scale = self.q_max / max_y
         self.scale.copy_(scale)
         
-        # Q(x) = round(T(x) * scale)
         quantized_weight = torch.clamp(torch.round(y * scale), -self.q_max, self.q_max).to(torch.int8)
         self.weight_q.copy_(quantized_weight)
         
@@ -115,47 +103,32 @@ class CustomCenterQuantizerLinear(nn.Module):
         gam = self.gamma.to(current_dtype)
         scale = self.scale.to(current_dtype)
         
-        # 1. 基礎反縮放
         y_hat = self.weight_q.to(current_dtype) / scale
         
         abs_y = torch.abs(y_hat)
         sign_y = torch.sign(y_hat)
         
-        # 2. 向量化並行計算所有可能的分支 (GPU 擅長一次算完)
-        # 核心區預先計算: eps + |y| * (gam - eps)
         core_val = sign_y * (eps + abs_y * (gam - eps))
         
-        # 長尾區預先計算: gam * exp(|y| - 1.0)
         tail_val = sign_y * gam * torch.exp(abs_y - 1.0)
         
-        # 3. 透過 torch.where 進行無遮罩的向量化選擇
-        # 如果 |y| > 1.0，選擇 tail_val，否則選擇 core_val
         x_hat = torch.where(abs_y > 1.0, tail_val, core_val)
         
-        # 處理死區 (Dead-zone): 如果原本量化後為 0，則強制歸零
         x_hat = torch.where(abs_y == 0.0, torch.zeros_like(x_hat), x_hat)
         
-        # 清理暫存變數
         del abs_y, sign_y, y_hat, core_val, tail_val
         
         current_bias = self.bias.to(current_dtype) if self.bias is not None else None
         
-        # 4. 執行矩陣乘法
         return nn.functional.linear(x, x_hat, current_bias)
 
 
 def replace_and_quantize_model(model, current_path=""):
-    """
-    遞迴遍歷整個模型，將原生的 nn.Linear 抽換為非均勻量化層。
-    加入排除機制，跳過 lm_head 以避免 VRAM 峰值並保護推論精度。
-    """
     for name, module in model.named_children():
         full_name = f"{current_path}.{name}" if current_path else name
         
         if isinstance(module, nn.Linear):
-            # 關鍵修改：跳過語言模型的輸出層 (lm_head)
             if "lm_head" in full_name:
-                print(f"  -> 保留原生 16-bit 精度以避免峰值: {full_name}")
                 continue
                 
             quantized_layer = CustomCenterQuantizerLinear(
@@ -170,8 +143,8 @@ def replace_and_quantize_model(model, current_path=""):
         else:
             replace_and_quantize_model(module, full_name)
             
-# ================= 硬體監控與推論包裝器 =================
-class OllamaTimingStreamer(BaseStreamer):
+# ================= 硬體監控 =================
+class TimingStreamer(BaseStreamer):
     def __init__(self):
         self.put_count = 0
         self.first_token_time = None
@@ -327,7 +300,6 @@ def main():
     try:
         load_start = time.time()
         
-        print(f"\n載入並設定模型專用分詞器參數...")
         tokenizer = AutoTokenizer.from_pretrained(
             repo_id,
             use_fast=True,
@@ -335,7 +307,7 @@ def main():
             legacy=False
         )
         
-        print("階段 1/3: 正在將原始模型載入系統 CPU RAM 中 (如果 RAM 不足將觸發 SSD Swap)...")
+        print("正在將原始模型載入系統 CPU RAM ")
         model = AutoModelForCausalLM.from_pretrained(
             repo_id, 
             device_map="cpu", 
@@ -343,28 +315,27 @@ def main():
             low_cpu_mem_usage=True
         )
         
-        print("階段 2/3: 正在 CPU 上執行自定義 8-bit 權重量化替換...")
+        print("正在 CPU 上執行量化")
         replace_and_quantize_model(model)
         
-        # 強制清理記憶體垃圾，把替換掉的 16-bit 浮點數完全丟棄
         gc.collect()
         
-        print("階段 3/3: 量化完成。正在將壓縮後的小體積模型推入 GPU...")
+        print("量化完成正在將模型推入 GPU")
         model = model.to("cuda")
         
-        print("階段 4: 啟動 PyTorch JIT 融合編譯器 (這將大幅提升推論速度，但第一次推論會花費較久時間編譯)...")
+        
         torch._dynamo.config.suppress_errors = True 
         model = torch.compile(model)
         
         load_duration = time.time() - load_start
-        print(f"載入與自定義量化總耗時: {load_duration:.2f} 秒")
+        print(f"載入與量化總耗時: {load_duration:.2f} 秒")
 
         inputs = tokenizer(USE_PROMPT, return_tensors="pt").to("cuda")
         prompt_eval_count = inputs.input_ids.shape[1]
 
         for run in range(1, TEST_RUNS + 1):
             print(f"  執行第 {run}/{TEST_RUNS} 次推論測試...")
-            streamer = OllamaTimingStreamer()
+            streamer = TimingStreamer()
             monitor.start()
             gen_start_time = time.time()
             
